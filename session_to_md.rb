@@ -2,6 +2,8 @@
 
 require 'json'
 require 'pathname'
+require 'io/console'
+require 'time'
 
 class SessionToMarkdown
   def initialize(input)
@@ -92,7 +94,9 @@ class SessionToMarkdown
   end
 
   def process_summary(data)
-    @output << "# #{data['summary']}"
+    # Generate summary from first user input instead of using data['summary']
+    summary = generate_summary_from_first_user_input
+    @output << "# #{summary}"
     @output << ""
   end
 
@@ -737,11 +741,514 @@ class SessionToMarkdown
       ""
     end
   end
+
+  def generate_summary_from_first_user_input
+    lines = @input.strip.split("\n")
+    
+    lines.each do |line|
+      next if line.strip.empty?
+      
+      begin
+        data = JSON.parse(line)
+        
+        # Skip non-user messages
+        next unless data['type'] == 'user'
+        
+        # Skip meta messages
+        next if data['isMeta']
+        
+        message = data['message']
+        content = message['content']
+        
+        # Extract text content
+        if content.is_a?(Array)
+          # Skip tool result messages
+          regular_content = content.select { |item| item['type'] != 'tool_result' }
+          next if regular_content.empty?
+          
+          content_text = regular_content.first
+          if content_text.is_a?(Hash) && content_text['type'] == 'text'
+            content = content_text['text']
+          else
+            content = content_text['content'] || content_text.to_json
+          end
+        end
+        
+        # Skip command messages
+        next if content.match(/<command-name>([^<]+)<\/command-name>/)
+        
+        # Skip special messages
+        next if content == "[Request interrupted by user for tool use]"
+        next if content.match(/<local-command-stdout><\/local-command-stdout>/)
+        
+        # Found the first actual user input
+        # Store up to 200 characters, display first 50
+        stored_content = content.length > 200 ? content[0...200] : content
+        display_content = stored_content.length > 50 ? stored_content[0...50] : stored_content
+        
+        return display_content
+      rescue => e
+        # Skip lines that can't be parsed
+        next
+      end
+    end
+    
+    # Fallback if no user input found
+    "Untitled"
+  end
 end
 
-# Read from STDIN
-input = $stdin.read
+class SessionBrowser
+  def initialize
+    @claude_projects_dir = File.expand_path("~/.claude/projects")
+  end
 
-# Convert and output
-converter = SessionToMarkdown.new(input)
-puts converter.convert
+  def run
+    unless Dir.exist?(@claude_projects_dir)
+      puts "Claude projects directory not found: #{@claude_projects_dir}"
+      exit 1
+    end
+
+    loop do
+      # Get list of projects
+      projects = Dir.entries(@claude_projects_dir)
+                    .reject { |d| d.start_with?('.') }
+                    .select { |d| File.directory?(File.join(@claude_projects_dir, d)) }
+                    .sort
+
+      if projects.empty?
+        puts "No projects found in #{@claude_projects_dir}"
+        exit 1
+      end
+
+      # Create display names for projects (remove path prefixes and make readable)
+      project_display_names = projects.map do |project|
+        display_name = project.gsub('-Users-mnutt-p-', '')
+                             .gsub('-', '/')
+                             .gsub('_', ' ')
+        display_name
+      end
+
+      # Let user select project
+      selected_project_display = select_from_list(project_display_names, "Select a project:")
+      return unless selected_project_display
+      
+      # Find the original project name
+      project_index = project_display_names.index(selected_project_display)
+      selected_project = projects[project_index]
+
+      project_dir = File.join(@claude_projects_dir, selected_project)
+      
+      # Get list of JSONL files
+      jsonl_files = Dir.glob(File.join(project_dir, "*.jsonl")).sort.reverse
+
+      if jsonl_files.empty?
+        puts "No session files found in #{project_dir}"
+        next  # Go back to project selection
+      end
+
+      # Build session list with metadata
+      sessions = build_session_list(jsonl_files)
+
+      # Sort sessions by timestamp, descending (most recent first)
+      sessions.sort! do |a, b|
+        begin
+          time_a = parse_timestamp_for_sorting(a[:timestamp])
+          time_b = parse_timestamp_for_sorting(b[:timestamp])
+          time_b <=> time_a  # Descending order
+        rescue
+          # If parsing fails, fall back to string comparison
+          b[:timestamp] <=> a[:timestamp]
+        end
+      end
+
+      # Let user select session
+      selected_session = select_from_list(sessions, "Select a session:")
+      
+      # If user escaped from session selection, go back to project selection
+      next unless selected_session
+
+      session_file = selected_session[:file]
+
+      # Process the selected file
+      input = File.read(session_file)
+      converter = SessionToMarkdown.new(input)
+      output = converter.convert
+      puts output
+      
+      # Copy to clipboard if pbcopy is available
+      if system("which pbcopy > /dev/null 2>&1")
+        IO.popen("pbcopy", "w") { |pipe| pipe.write(output) }
+        puts "\n📋 Copied to clipboard"
+      end
+      
+      return  # Exit after processing a session
+    end
+  end
+
+  private
+
+  def build_session_list(jsonl_files)
+    jsonl_files.map do |file|
+      begin
+        # Read first few lines to find timestamp and summary
+        timestamp = nil
+        summary = 'Untitled'
+        message_count = 0
+        
+        File.open(file) do |f|
+          # Keep reading until we find a valid timestamp or reach end of file
+          while !f.eof?
+            line = f.readline
+            entry = JSON.parse(line)
+            
+            # Count messages (user and assistant)
+            if entry['type'] == 'user' || entry['type'] == 'assistant'
+              message_count += 1
+            end
+            
+            # Get timestamp from first entry that has a valid one
+            if timestamp.nil? && entry['timestamp'] && is_valid_timestamp?(entry['timestamp'])
+              timestamp = entry['timestamp']
+            end
+            
+            # Generate summary from first user input instead of using summary entry
+            if summary == 'Untitled' && entry['type'] == 'user' && !entry['isMeta']
+              summary = extract_first_user_input_for_summary(entry)
+            end
+            
+            # Break early if we have both
+            break if timestamp && summary != 'Untitled'
+          end
+        end
+        
+        # Fallback to filename if no timestamp found
+        timestamp ||= File.basename(file).sub('.jsonl', '')
+        
+        # Get file modification time
+        mtime = File.mtime(file)
+        
+        {
+          file: file,
+          timestamp: timestamp,
+          summary: summary,
+          message_count: message_count,
+          modified: mtime,
+          created: mtime # Using mtime as created for now
+        }
+      rescue => e
+        mtime = File.mtime(file) rescue Time.now
+        {
+          file: file,
+          timestamp: File.basename(file).sub('.jsonl', ''),
+          summary: 'Error reading file',
+          message_count: 0,
+          modified: mtime,
+          created: mtime
+        }
+      end
+    end
+  end
+
+  def is_valid_timestamp?(timestamp)
+    return false if timestamp.nil? || timestamp.empty?
+    
+    # Reject UUIDs
+    return false if timestamp.match(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i)
+    
+    # Accept ISO timestamps, Unix timestamps, or anything that looks like a date
+    return true if timestamp.match(/^\d{4}-\d{2}-\d{2}/)  # Date format
+    return true if timestamp.match(/^\d{10,13}$/)         # Unix timestamp
+    return true if timestamp.match(/T\d{2}:\d{2}:\d{2}/)  # ISO timestamp
+    
+    # Try to parse it as a time to see if it's valid
+    begin
+      Time.parse(timestamp)
+      true
+    rescue ArgumentError
+      false
+    end
+  end
+
+  def parse_timestamp_for_sorting(timestamp)
+    return Time.at(0) if timestamp.nil? || timestamp.empty?
+    
+    # Handle different timestamp formats
+    case timestamp
+    when /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/ # ISO format
+      Time.parse(timestamp)
+    when /^\d{4}-\d{2}-\d{2}/ # Date only
+      Time.parse(timestamp)
+    when /^\d{10}$/ # Unix timestamp (seconds)
+      Time.at(timestamp.to_i)
+    when /^\d{13}$/ # Unix timestamp (milliseconds)
+      Time.at(timestamp.to_i / 1000.0)
+    else
+      # Try general parsing, fallback to epoch if it fails
+      begin
+        Time.parse(timestamp)
+      rescue ArgumentError
+        # For non-parseable strings (like UUIDs), use epoch time so they sort to bottom
+        Time.at(0)
+      end
+    end
+  end
+
+  def format_timestamp(timestamp)
+    return timestamp if timestamp.nil? || timestamp.empty?
+    
+    # If it looks like a UUID or random string, don't try to parse it as time
+    if timestamp.match(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i)
+      return timestamp[0..7] # Show first 8 chars of UUID
+    end
+    
+    # If timestamp is already nicely formatted, return as-is
+    return timestamp if timestamp.match(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/)
+    
+    # Try to parse various timestamp formats
+    begin
+      time = case timestamp
+      when /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/ # ISO format
+        Time.parse(timestamp)
+      when /^\d{4}-\d{2}-\d{2}/ # Date only
+        Time.parse(timestamp)
+      when /^\d{10}$/ # Unix timestamp (seconds)
+        Time.at(timestamp.to_i)
+      when /^\d{13}$/ # Unix timestamp (milliseconds)
+        Time.at(timestamp.to_i / 1000.0)
+      else
+        # Try general parsing
+        Time.parse(timestamp)
+      end
+      
+      # Format the time nicely
+      time.strftime("%Y-%m-%d %H:%M")
+    rescue ArgumentError, TypeError
+      # If parsing fails, return the first 16 chars or the whole string if shorter
+      timestamp.length > 16 ? timestamp[0..15] + "..." : timestamp
+    end
+  end
+
+  def format_relative_time(time)
+    now = Time.now
+    diff = now - time
+    
+    case diff
+    when 0...60
+      "#{diff.to_i} seconds ago"
+    when 60...3600
+      minutes = (diff / 60).to_i
+      "#{minutes} minute#{minutes == 1 ? '' : 's'} ago"
+    when 3600...86400
+      hours = (diff / 3600).to_i
+      "#{hours} hour#{hours == 1 ? '' : 's'} ago"
+    when 86400...604800
+      days = (diff / 86400).to_i
+      "#{days} day#{days == 1 ? '' : 's'} ago"
+    when 604800...2419200
+      weeks = (diff / 604800).to_i
+      "#{weeks} week#{weeks == 1 ? '' : 's'} ago"
+    else
+      months = (diff / 2419200).to_i
+      "#{months} month#{months == 1 ? '' : 's'} ago"
+    end
+  end
+
+  def extract_first_user_input_for_summary(entry)
+    message = entry['message']
+    content = message['content']
+    
+    # Extract text content
+    if content.is_a?(Array)
+      # Skip tool result messages
+      regular_content = content.select { |item| item['type'] != 'tool_result' }
+      return 'Untitled' if regular_content.empty?
+      
+      content_text = regular_content.first
+      if content_text.is_a?(Hash) && content_text['type'] == 'text'
+        content = content_text['text']
+      else
+        content = content_text['content'] || content_text.to_json
+      end
+    end
+    
+    # Skip command messages
+    return 'Untitled' if content.match(/<command-name>([^<]+)<\/command-name>/)
+    
+    # Skip special messages
+    return 'Untitled' if content == "[Request interrupted by user for tool use]"
+    return 'Untitled' if content.match(/<local-command-stdout><\/local-command-stdout>/)
+    
+    # Found actual user input
+    # Store up to 200 characters, display first 50
+    stored_content = content.length > 200 ? content[0...200] : content
+    display_content = stored_content.length > 50 ? stored_content[0...50] : stored_content
+    
+    display_content
+  end
+
+  def select_from_list(items, prompt)
+    return nil if items.empty?
+
+    selected_index = 0
+    filter = ""
+
+    # Check if items are session objects or strings
+    is_session_list = items.first.is_a?(Hash) && items.first.key?(:summary)
+
+    # Save terminal state and prepare for raw input
+    begin
+      $stdin.raw do |io|
+        loop do
+          # Clear screen and reset cursor
+          print "\033[2J\033[H"
+          
+          if is_session_list
+            # Session list display with Claude Code format
+            print "  \033[1mModified      Created       # Messages  Summary\033[0m\r\n"
+            
+            # Get filtered items
+            filtered_items = if filter.empty?
+              items.each_with_index.to_a
+            else
+              items.each_with_index.select { |item, _| item[:summary].downcase.include?(filter.downcase) }
+            end
+
+            # Display items with selection indicator
+            filtered_items.each_with_index do |(item, original_index), display_index|
+              modified_str = format_relative_time(item[:modified]).ljust(13)
+              created_str = format_relative_time(item[:created]).ljust(13)
+              message_count_str = item[:message_count].to_s.rjust(10)
+              
+              # Truncate summary to fit
+              summary = item[:summary]
+              summary = summary[0..42] + "..." if summary.length > 45
+              
+              display_line = "#{modified_str} #{created_str} #{message_count_str}  #{summary}"
+              
+              if display_index == selected_index
+                print "\033[46m\033[30m❯ #{display_line.ljust(77)}\033[0m\r\n"
+              else
+                print "  #{display_line}\r\n"
+              end
+            end
+
+            # Handle empty filter results
+            if filtered_items.empty?
+              print "\033[31m  (No matches found)\033[0m\r\n"
+            end
+
+            # Show filter and instructions
+            print "\r\n"
+            if !filter.empty?
+              print "\033[33mFilter: #{filter}\033[0m\r\n"
+            end
+            print "\033[2mUse ↑/↓ arrows to navigate, type to filter, Enter to select, Esc to quit\033[0m\r\n"
+            print "\033[2m#{filtered_items.length} of #{items.length} sessions\033[0m\r\n"
+          else
+            # Regular string list display
+            print "┌─────────────────────────────────────────────────────────────┐\r\n"
+            print "│ \033[1m#{prompt.ljust(59)}\033[0m │\r\n"
+            print "├─────────────────────────────────────────────────────────────┤\r\n"
+            print "│ \033[2mUse ↑/↓ arrows to navigate, type to filter, Enter to select\033[0m │\r\n"
+            print "│ \033[2mPress Esc to quit\033[0m                                     │\r\n"
+            
+            if filter.empty?
+              print "├─────────────────────────────────────────────────────────────┤\r\n"
+            else
+              print "├─────────────────────────────────────────────────────────────┤\r\n"
+              print "│ \033[33mFilter: #{filter.ljust(49)}\033[0m │\r\n"
+            end
+            
+            print "└─────────────────────────────────────────────────────────────┘\r\n"
+            print "\r\n"
+
+            # Get filtered items
+            filtered_items = if filter.empty?
+              items.each_with_index.to_a
+            else
+              items.each_with_index.select { |item, _| item.downcase.include?(filter.downcase) }
+            end
+
+            # Display items with selection indicator
+            filtered_items.each_with_index do |(item, original_index), display_index|
+              # Truncate long items to fit in display
+              display_item = item.length > 75 ? item[0..71] + "..." : item
+              
+              if display_index == selected_index
+                print "\033[46m\033[30m❯ #{display_item.ljust(77)}\033[0m\r\n"
+              else
+                print "  #{display_item}\r\n"
+              end
+            end
+
+            # Handle empty filter results
+            if filtered_items.empty?
+              print "\033[31m  (No matches found)\033[0m\r\n"
+            end
+
+            # Show count
+            print "\r\n"
+            print "\033[2m#{filtered_items.length} of #{items.length} items\033[0m\r\n"
+          end
+
+          $stdout.flush
+
+          # Read input
+          char = io.getch
+          
+          case char
+          when "\e" # Escape sequences
+            begin
+              next_char = io.read_nonblock(1)
+              if next_char == "["
+                arrow = io.read_nonblock(1)
+                case arrow
+                when "A" # Up arrow
+                  selected_index = [selected_index - 1, 0].max
+                when "B" # Down arrow
+                  selected_index = [selected_index + 1, filtered_items.length - 1].min
+                end
+              end
+            rescue IO::WaitReadable
+              # Just escape key - quit
+              print "\033[2J\033[H"
+              return nil
+            end
+          when "\r", "\n" # Enter
+            print "\033[2J\033[H"
+            return items[filtered_items[selected_index][1]] if filtered_items.any?
+          when "\u007F", "\b" # Backspace
+            filter = filter[0...-1] unless filter.empty?
+            selected_index = 0
+          when "\u0003" # Ctrl+C
+            print "\033[2J\033[H"
+            exit 0
+          else
+            # Regular character - add to filter
+            if char =~ /[[:print:]]/
+              filter += char
+              selected_index = 0
+            end
+          end
+        end
+      end
+    ensure
+      # Restore terminal to normal mode
+      print "\033[2J\033[H"
+      $stdout.flush
+    end
+  end
+end
+
+# Main execution
+if $stdin.tty?
+  # No piped input - show TUI
+  browser = SessionBrowser.new
+  browser.run
+else
+  # Piped input - process as before
+  input = $stdin.read
+  converter = SessionToMarkdown.new(input)
+  puts converter.convert
+end
