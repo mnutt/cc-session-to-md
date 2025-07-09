@@ -4,6 +4,8 @@ require 'json'
 require 'pathname'
 require 'io/console'
 require 'time'
+require 'yaml'
+require 'set'
 
 # Language detection mappings
 LANGUAGE_BY_EXTENSION = {
@@ -182,14 +184,14 @@ module TerminalUI
 
   def self.display_session_list(filtered_items, selected_index, filter)
     print "  \033[1mModified      Created       # Messages  Summary\033[0m\r\n"
-    
+
     filtered_items.each_with_index do |(item, original_index), display_index|
       modified_str = format_relative_time(item[:modified]).ljust(13)
       created_str = format_relative_time(item[:created]).ljust(13)
       message_count_str = item[:message_count].to_s.rjust(10)
       
       summary = item[:summary]
-      summary = summary[0..42] + "..." if summary.length > 45
+      summary = summary[0..57] + "..." if summary.length > 60
       
       display_line = "#{modified_str} #{created_str} #{message_count_str}  #{summary}"
       
@@ -333,10 +335,33 @@ class SessionToMarkdown
     @current_cwd = nil
     @current_assistant_message = nil
     @current_tool_use_result = nil
+    @sessions = {}
+    @summary_map = {}
   end
 
   def convert
-    messages = parse_messages
+    parse_sessions
+    
+    @sessions.keys.sort.map do |session_id|
+      convert_session(session_id)
+    end.join("\n\n---\n\n")
+  end
+  
+  def convert_session(session_id)
+    messages = @sessions[session_id][:messages]
+    summary = @sessions[session_id][:summary] || @sessions[session_id][:generated_summary] || 'Untitled'
+    
+    # Reset state for each session
+    @output = []
+    @pending_tools = []
+    @pending_tool_results = []
+    @tool_call_map = {}
+    @current_cwd = nil
+    @current_assistant_message = nil
+    @current_tool_use_result = nil
+    
+    @output << "# #{summary}"
+    @output << ""
     
     messages.each_with_index do |data, index|
       begin
@@ -355,14 +380,21 @@ class SessionToMarkdown
 
   private
 
-  def parse_messages
-    messages = []
+  def parse_sessions
+    summary_leafs = {}
     
+    # First pass - collect all summaries
     @input.strip.split("\n").each do |line|
       next if line.strip.empty?
       
       begin
-        messages << JSON.parse(line)
+        data = JSON.parse(line)
+        
+        if data['type'] == 'summary'
+          leaf_uuid = data['leafUuid']
+          summary = data['summary']
+          summary_leafs[leaf_uuid] = summary if leaf_uuid && summary
+        end
       rescue => e
         $stderr.puts "Error parsing JSON line: #{e.message}"
         $stderr.puts "Offending line: #{line}"
@@ -370,7 +402,59 @@ class SessionToMarkdown
       end
     end
     
-    messages
+    # Second pass - process messages and apply summaries
+    @input.strip.split("\n").each do |line|
+      next if line.strip.empty?
+      
+      begin
+        data = JSON.parse(line)
+        
+        if data['sessionId']
+          # Process messages with sessionId
+          session_id = data['sessionId']
+          
+          # Create session if it doesn't exist
+          @sessions[session_id] ||= {
+            messages: [],
+            summary: nil,
+            generated_summary: nil
+          }
+          
+          @sessions[session_id][:messages] << data
+          
+          # Check if this message's uuid has a summary
+          if data['uuid'] && summary_leafs[data['uuid']]
+            @sessions[session_id][:summary] = summary_leafs[data['uuid']]
+          end
+          
+          # Generate summary from first user message if we don't have one yet
+          if @sessions[session_id][:generated_summary].nil? && 
+             data['type'] == 'user' && !data['isMeta']
+            message = Message.new(data)
+            unless message.command? || message.interruption_message? || message.empty_command_output?
+              if message.content_array?
+                regular_content = message.regular_content
+                unless regular_content.empty?
+                  content_text = message.text_content
+                  unless content_text.empty?
+                    @sessions[session_id][:generated_summary] = content_text.length > 50 ? content_text[0...50] : content_text
+                  end
+                end
+              else
+                content_text = message.text_content
+                unless content_text.empty?
+                  @sessions[session_id][:generated_summary] = content_text.length > 50 ? content_text[0...50] : content_text
+                end
+              end
+            end
+          end
+        end
+      rescue => e
+        $stderr.puts "Error parsing JSON line: #{e.message}"
+        $stderr.puts "Offending line: #{line}"
+        raise e
+      end
+    end
   end
 
   def strip_line_numbers(content)
@@ -405,9 +489,7 @@ class SessionToMarkdown
   end
 
   def process_summary(data)
-    summary = generate_summary_from_first_user_input
-    @output << "# #{summary}"
-    @output << ""
+    # Summaries are now handled at the session level, skip them here
   end
 
   def process_user_message(data, messages, index)
@@ -846,34 +928,27 @@ class SessionToMarkdown
     LANGUAGE_BY_EXTENSION[extension] || ""
   end
 
-  def generate_summary_from_first_user_input
-    @input.strip.split("\n").each do |line|
-      next if line.strip.empty?
+  def generate_summary_from_messages(messages)
+    messages.each do |data|
+      next unless data['type'] == 'user' && !data['isMeta']
       
-      begin
-        data = JSON.parse(line)
-        next unless data['type'] == 'user' && !data['isMeta']
-        
-        message = Message.new(data)
-        next if message.command?
-        next if message.interruption_message?
-        next if message.empty_command_output?
-        
-        # Skip tool result messages
-        if message.content_array?
-          regular_content = message.regular_content
-          next if regular_content.empty?
-        end
-        
-        # Extract text content
-        content_text = message.text_content
-        next if content_text.empty?
-        
-        # Return first 50 chars
-        return content_text.length > 50 ? content_text[0...50] : content_text
-      rescue
-        next
+      message = Message.new(data)
+      next if message.command?
+      next if message.interruption_message?
+      next if message.empty_command_output?
+      
+      # Skip tool result messages
+      if message.content_array?
+        regular_content = message.regular_content
+        next if regular_content.empty?
       end
+      
+      # Extract text content
+      content_text = message.text_content
+      next if content_text.empty?
+      
+      # Return first 50 chars
+      return content_text.length > 50 ? content_text[0...50] : content_text
     end
     
     "Untitled"
@@ -943,11 +1018,36 @@ class SessionBrowser
     selected_session = TerminalUI.select_from_list(sessions, "Select a session:")
     return unless selected_session
     
-    process_session(selected_session[:file])
+    process_session(selected_session)
   end
 
-  def process_session(session_file)
-    input = File.read(session_file)
+  def process_session(session_info)
+    # Need to read from all files that contributed to this session
+    output_lines = []
+    
+    # Get all JSONL files in the project directory
+    project_dir = File.dirname(session_info[:file])
+    jsonl_files = Dir.glob(File.join(project_dir, "*.jsonl")).sort
+    
+    # Just collect all relevant lines for this session
+    jsonl_files.each do |file|
+      File.open(file) do |f|
+        while !f.eof?
+          line = f.readline
+          entry = JSON.parse(line)
+          
+          # Include all summary messages (the converter will handle matching them)
+          if entry['type'] == 'summary'
+            output_lines << line.strip
+          elsif entry['sessionId'] == session_info[:session_id]
+            # Include messages from the selected session
+            output_lines << line.strip
+          end
+        end
+      end
+    end
+    
+    input = output_lines.join("\n")
     converter = SessionToMarkdown.new(input)
     output = converter.convert
     puts output
@@ -972,55 +1072,109 @@ class SessionBrowser
   end
 
   def build_session_list(jsonl_files)
-    jsonl_files.map { |file| build_session_info(file) }
+    sessions = {}
+    
+    # Process all files and build a single sessions hash
+    jsonl_files.each do |file|
+      process_file_into_sessions(file, sessions)
+    end
+
+    # puts sessions.map {|k, v| { id: k, message_count: v[:messages].count, summary: v[:summary], generated_summary: v[:generated_summary] } }.inspect
+    # exit 0
+    
+    # Convert to session info format
+    session_list = sessions.map do |session_id, data|
+      # Use summary || generated_summary || "Untitled"
+      display_summary = data[:summary] || data[:generated_summary] || 'Untitled'
+      message_count = data[:messages].count { |m| m['type'] == 'user' || m['type'] == 'assistant' }
+      
+      # Get the last file that contributed to this session
+      last_file = data[:files].last
+      
+      {
+        file: last_file,  # Store the last file for this session
+        session_id: session_id,
+        timestamp: data[:last_timestamp] || session_id,
+        summary: display_summary,
+        message_count: message_count,
+        modified: data[:last_modified],
+        created: data[:first_created]
+      }
+    end.select { |session| session[:message_count] > 0 }
+    
+    session_list
   end
 
-  def build_session_info(file)
-    timestamp = nil
-    summary = 'Untitled'
-    message_count = 0
+  def process_file_into_sessions(file, sessions)
+    file_mtime = File.mtime(file)
+    summary_leafs = {}
     
+    # Single pass - collect summaries and process messages
     File.open(file) do |f|
       while !f.eof?
         line = f.readline
         entry = JSON.parse(line)
         
-        if entry['type'] == 'user' || entry['type'] == 'assistant'
-          message_count += 1
+        if entry['type'] == 'summary'
+          # Collect summary
+          leaf_uuid = entry['leafUuid']
+          summary = entry['summary']
+          summary_leafs[leaf_uuid] = summary if leaf_uuid && summary
+        elsif entry['sessionId']
+          # Process messages with sessionId
+          session_id = entry['sessionId']
+          
+          # Create session if it doesn't exist
+          sessions[session_id] ||= {
+            messages: [],
+            first_timestamp: nil,
+            last_timestamp: nil,
+            summary: nil,
+            generated_summary: nil,
+            files: [],
+            first_created: file_mtime,
+            last_modified: file_mtime
+          }
+          
+          sessions[session_id][:messages] << entry
+          
+          # Check if this message's uuid has a summary
+          if entry['uuid'] && summary_leafs[entry['uuid']]
+            sessions[session_id][:summary] = summary_leafs[entry['uuid']]
+          end
+          
+          # Track which files contributed to this session
+          sessions[session_id][:files] << file unless sessions[session_id][:files].include?(file)
+          
+          # Update modification times
+          sessions[session_id][:last_modified] = file_mtime
+          sessions[session_id][:first_created] = file_mtime if file_mtime < sessions[session_id][:first_created]
+          
+          # Track timestamps
+          if entry['timestamp'] && valid_timestamp?(entry['timestamp'])
+            sessions[session_id][:first_timestamp] ||= entry['timestamp']
+            sessions[session_id][:last_timestamp] = entry['timestamp']
+          end
+          
+          # Generate summary from first user message if we don't have one yet
+          if sessions[session_id][:generated_summary].nil? && 
+             entry['type'] == 'user' && !entry['isMeta']
+            sessions[session_id][:generated_summary] = extract_summary_from_entry(entry)
+          end
         end
-        
-        if timestamp.nil? && entry['timestamp'] && valid_timestamp?(entry['timestamp'])
-          timestamp = entry['timestamp']
-        end
-        
-        if summary == 'Untitled' && entry['type'] == 'user' && !entry['isMeta']
-          summary = extract_summary_from_entry(entry)
-        end
-        
-        break if timestamp && summary != 'Untitled'
       end
     end
     
-    timestamp ||= File.basename(file).sub('.jsonl', '')
-    mtime = File.mtime(file)
-    
-    {
-      file: file,
-      timestamp: timestamp,
-      summary: summary,
-      message_count: message_count,
-      modified: mtime,
-      created: mtime
-    }
+    # Apply any summaries that came after their messages
+    sessions.each do |session_id, session_data|
+      session_data[:messages].each do |message|
+        if message['uuid'] && summary_leafs[message['uuid']] && session_data[:summary].nil?
+          session_data[:summary] = summary_leafs[message['uuid']]
+        end
+      end
+    end
   rescue => e
-    {
-      file: file,
-      timestamp: File.basename(file).sub('.jsonl', ''),
-      summary: 'Error reading file',
-      message_count: 0,
-      modified: File.mtime(file),
-      created: File.mtime(file)
-    }
+    $stderr.puts "Error processing file #{file}: #{e.message}"
   end
 
   def valid_timestamp?(timestamp)
