@@ -12,6 +12,7 @@ class SessionToMarkdown
     @tool_call_map = {}  # Map tool_use_id to tool call info
     @current_cwd = nil
     @current_assistant_message = nil
+    @current_tool_use_result = nil
   end
 
   def convert
@@ -24,15 +25,23 @@ class SessionToMarkdown
       begin
         data = JSON.parse(line)
         messages << data
-      rescue JSON::ParserError => e
-        # Skip malformed JSON lines
-        next
+      rescue => e
+        $stderr.puts "Error parsing JSON line: #{e.message}"
+        $stderr.puts "Offending line: #{line}"
+        raise e
       end
     end
     
     # Process messages with tool call coalescing
     messages.each_with_index do |message, index|
-      process_message(message, messages, index)
+      begin
+        process_message(message, messages, index)
+      rescue => e
+        $stderr.puts "Error processing message at index #{index}: #{e.message}"
+        $stderr.puts "Message data: #{message.to_json}"
+        $stderr.puts "Backtrace: #{e.backtrace.join("\n")}"
+        raise e
+      end
     end
     
     # Flush any remaining pending tool results
@@ -83,43 +92,92 @@ class SessionToMarkdown
   def process_user_message(data, messages, index)
     message = data['message']
     
+    # Skip "Caveat" meta messages
+    if data['isMeta'] && message['content'].is_a?(String) && message['content'].start_with?("Caveat:")
+      return
+    elsif data['isMeta'] && message['content'].is_a?(Array)
+      # Check if any text content starts with "Caveat:"
+      text_contents = message['content'].select { |item| item['type'] == 'text' }
+      if text_contents.any? { |item| item['text']&.start_with?("Caveat:") }
+        return
+      end
+    end
+    
+    # Capture toolUseResult data if present
+    @current_tool_use_result = data['toolUseResult']
+    
     if message['content'].is_a?(Array)
       # Check if this is a tool result response
       tool_results = message['content'].select { |item| item['type'] == 'tool_result' }
       regular_content = message['content'].select { |item| item['type'] != 'tool_result' }
       
       if tool_results.any?
-        # Add tool results to pending collection
-        tool_results.each do |tool_result|
-          @pending_tool_results << tool_result
-        end
+        # Check if any tool result is an error (user cancellation)
+        error_results = tool_results.select { |result| result['is_error'] }
         
-        # Check if the next message is also a user message with tool results
-        next_message = messages[index + 1]
-        is_continuing_results = next_message && 
-                               next_message['type'] == 'user' && 
-                               next_message['message']['content'].is_a?(Array) &&
-                               next_message['message']['content'].any? { |item| item['type'] == 'tool_result' }
-        
-        # If not continuing, flush the results
-        unless is_continuing_results
-          flush_pending_tool_results
+        if error_results.any?
+          # Show user cancellation prominently
+          @output << "**❌ User cancelled tool execution**"
+          @output << ""
+        else
+          # Add tool results to pending collection
+          tool_results.each do |tool_result|
+            @pending_tool_results << tool_result
+          end
+          
+          # Check if the next message is also a user message with tool results
+          next_message = messages[index + 1]
+          is_continuing_results = next_message && 
+                                 next_message['type'] == 'user' && 
+                                 next_message['message']['content'].is_a?(Array) &&
+                                 next_message['message']['content'].any? { |item| item['type'] == 'tool_result' }
+          
+          # If not continuing, flush the results
+          unless is_continuing_results
+            flush_pending_tool_results
+          end
         end
       end
       
       if regular_content.any?
+        # Check for special content types
+        content_item = regular_content.first
+        content_text = content_item['content'] || content_item.to_s
+        
+        if content_text == "[Request interrupted by user for tool use]"
+          # Skip this message since we already showed the cancellation above
+          return
+        end
+        
         @output << "### User"
         @output << ""
         regular_content.each do |content_item|
-          @output << "> #{content_item['content'] || content_item.to_s}"
+          content_text = content_item['content'] || content_item.to_s
+          content_text.split("\n").each do |line|
+            @output << "> #{line}"
+          end
         end
         @output << ""
       end
     else
       # Regular user message
+      content = message['content']
+      
+      # Handle special command formats
+      if content.match(/<command-name>\/clear<\/command-name>/)
+        @output << "**🧹 User cleared the session**"
+        @output << ""
+        return
+      elsif content.match(/<local-command-stdout><\/local-command-stdout>/)
+        # Skip empty command output
+        return
+      end
+      
       @output << "### User"
       @output << ""
-      @output << "> #{message['content']}"
+      content.split("\n").each do |line|
+        @output << "> #{line}"
+      end
       @output << ""
     end
   end
@@ -190,43 +248,75 @@ class SessionToMarkdown
       content = tool_result['content']
       tool_use_id = tool_result['tool_use_id']
       
-      # Create a summary for the list item
-      tool_summary = create_tool_result_list_summary(content, tool_use_id)
+      # Check if this tool result has structured patch data
+      structured_patch = @current_tool_use_result.is_a?(Hash) ? @current_tool_use_result['structuredPatch'] : nil
+      file_path = @current_tool_use_result.is_a?(Hash) ? @current_tool_use_result['filePath'] : nil
       
-      @output << "<details><summary>#{tool_summary}</summary>"
-      @output << ""
-      
-      # Format the content based on type
-      if content.match(/^\s*\d+→/)
-        # File read result with line numbers
-        language = detect_language(content)
-        @output << "```#{language}"
-        @output << content
+      if structured_patch && file_path
+        # Show file edit as a proper diff
+        relative_path = make_relative_path(file_path)
+        @output << "**Edit:** `#{relative_path}`"
+        @output << ""
+        @output << "```diff"
+        
+        structured_patch.each do |hunk|
+          lines = hunk['lines']
+          lines.each do |line|
+            @output << line
+          end
+        end
+        
         @output << "```"
-      elsif content.match(/^(Found \d+ files|\/.*\..*$)/)
-        # File search results
-        @output << "```"
-        @output << content
-        @output << "```"
-      elsif content.match(/^\s*(import|export|function|const|let|var|class|interface|type)/)
-        # Code content
-        @output << "```typescript"
-        @output << content
-        @output << "```"
+        @output << ""
       else
-        # Plain text result
-        @output << "```"
-        @output << content
-        @output << "```"
+        # Create a summary for the list item
+        tool_summary = create_tool_result_list_summary(content, tool_use_id)
+        
+        @output << "<details><summary>#{tool_summary}</summary>"
+        @output << ""
+        
+        # Format the content based on type
+        if content.is_a?(Array)
+          # Handle structured content (array of content items)
+          content.each do |content_item|
+            if content_item['type'] == 'text'
+              @output << content_item['text']
+              @output << ""
+            end
+          end
+        elsif content.match(/^\s*\d+→/)
+          # File read result with line numbers
+          language = detect_language(content)
+          @output << "```#{language}"
+          @output << content
+          @output << "```"
+        elsif content.match(/^(Found \d+ files|\/.*\..*$)/)
+          # File search results
+          @output << "```"
+          @output << content
+          @output << "```"
+        elsif content.match(/^\s*(import|export|function|const|let|var|class|interface|type)/)
+          # Code content
+          @output << "```typescript"
+          @output << content
+          @output << "```"
+        else
+          # Plain text result
+          @output << "```"
+          @output << content
+          @output << "```"
+        end
+        
+        @output << "</details>"
+        @output << ""
       end
-      
-      @output << "</details>"
-      @output << ""
     end
     
     @pending_tool_results.clear
     # Also clear pending tools since they've been displayed with results
     @pending_tools.clear
+    # Clear current tool use result
+    @current_tool_use_result = nil
   end
 
   def create_combined_tool_results_summary(tool_results)
