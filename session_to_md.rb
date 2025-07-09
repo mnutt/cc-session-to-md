@@ -121,6 +121,24 @@ module TerminalUI
     print "\033[2J\033[H"
   end
 
+  def self.truncate(str, size)
+    return str unless str && str.length > size
+    str[0...(size - 3)] + "..."
+  end
+
+  def self.print_title
+    print "\033[36m"  # Cyan color
+    print "   ██████╗ ██████╗ ██████╗███╗   ███╗██████╗ \r\n"
+    print "  ██╔════╝██╔════╝╚════██╗████╗ ████║██╔══██╗\r\n"
+    print "  ██║     ██║      █████╔╝██╔████╔██║██║  ██║\r\n"
+    print "  ██║     ██║     ██╔═══╝ ██║╚██╔╝██║██║  ██║\r\n"
+    print "  ╚██████╗╚██████╗███████╗██║ ╚═╝ ██║██████╔╝\r\n"
+    print "   ╚═════╝ ╚═════╝╚══════╝╚═╝     ╚═╝╚═════╝ \r\n"
+    print "\033[0m"  # Reset color
+    print "\033[2m          Claude Code Session to Markdown\033[0m\r\n"
+    print "\r\n"
+  end
+
   def self.select_from_list(items, prompt)
     return nil if items.empty?
 
@@ -183,20 +201,24 @@ module TerminalUI
   end
 
   def self.display_session_list(filtered_items, selected_index, filter)
+    print_title
     print "  \033[1mModified      Created       # Messages  Summary\033[0m\r\n"
+
+    terminal_width = get_terminal_width
+    static_width = 42  # "❯ " (2) + modified (13) + " " (1) + created (13) + " " (1) + messages (10) + "  " (2)
+    available_summary_width = terminal_width - static_width
 
     filtered_items.each_with_index do |(item, original_index), display_index|
       modified_str = format_relative_time(item[:modified]).ljust(13)
       created_str = format_relative_time(item[:created]).ljust(13)
       message_count_str = item[:message_count].to_s.rjust(10)
       
-      summary = item[:summary]
-      summary = summary[0..57] + "..." if summary.length > 60
+      summary = truncate(item[:summary], available_summary_width)
       
       display_line = "#{modified_str} #{created_str} #{message_count_str}  #{summary}"
       
       if display_index == selected_index
-        print "\033[46m\033[30m❯ #{display_line.ljust(77)}\033[0m\r\n"
+        print "\033[46m\033[30m❯ #{display_line.ljust(terminal_width - 2)}\033[0m\r\n"
       else
         print "  #{display_line}\r\n"
       end
@@ -233,11 +255,16 @@ module TerminalUI
   end
 
   def self.print_string_list_header(prompt, filter)
+    # Display ASCII art title for project selection
+    if prompt == "Select a project:"
+      print_title
+    end
+    
     print "┌─────────────────────────────────────────────────────────────┐\r\n"
     print "│ \033[1m#{prompt.ljust(59)}\033[0m │\r\n"
     print "├─────────────────────────────────────────────────────────────┤\r\n"
     print "│ \033[2mUse ↑/↓ arrows to navigate, type to filter, Enter to select\033[0m │\r\n"
-    print "│ \033[2mPress Esc to quit\033[0m                                     │\r\n"
+    print "│ \033[2mPress Esc to quit\033[0m                                           │\r\n"
     
     if filter.empty?
       print "├─────────────────────────────────────────────────────────────┤\r\n"
@@ -296,6 +323,14 @@ module TerminalUI
       end
     rescue IO::WaitReadable
       { type: :quit }
+    end
+  end
+
+  def self.get_terminal_width
+    begin
+      IO.console.winsize[1]
+    rescue
+      80  # fallback to 80 columns
     end
   end
 
@@ -437,13 +472,13 @@ class SessionToMarkdown
                 unless regular_content.empty?
                   content_text = message.text_content
                   unless content_text.empty?
-                    @sessions[session_id][:generated_summary] = content_text.length > 50 ? content_text[0...50] : content_text
+                    @sessions[session_id][:generated_summary] = clean_summary(content_text)
                   end
                 end
               else
                 content_text = message.text_content
                 unless content_text.empty?
-                  @sessions[session_id][:generated_summary] = content_text.length > 50 ? content_text[0...50] : content_text
+                  @sessions[session_id][:generated_summary] = clean_summary(content_text)
                 end
               end
             end
@@ -928,6 +963,23 @@ class SessionToMarkdown
     LANGUAGE_BY_EXTENSION[extension] || ""
   end
 
+  def clean_summary(text)
+    return text unless text
+    
+    # Remove line breaks and normalize whitespace
+    cleaned = text.gsub(/\s+/, ' ').strip
+    
+    # Remove trailing dots
+    cleaned = cleaned.sub(/\.+$/, '')
+    
+    cleaned
+  end
+
+  def truncate(str, size)
+    return str unless str && str.length > size
+    str[0...(size - 3)] + "..."
+  end
+
   def generate_summary_from_messages(messages)
     messages.each do |data|
       next unless data['type'] == 'user' && !data['isMeta']
@@ -947,8 +999,8 @@ class SessionToMarkdown
       content_text = message.text_content
       next if content_text.empty?
       
-      # Return first 50 chars
-      return content_text.length > 50 ? content_text[0...50] : content_text
+      # Return cleaned summary
+      return clean_summary(content_text)
     end
     
     "Untitled"
@@ -958,6 +1010,18 @@ end
 class SessionBrowser
   def initialize
     @claude_projects_dir = File.expand_path("~/.claude/projects")
+  end
+
+  def clean_summary(text)
+    return text unless text
+    
+    # Remove line breaks and normalize whitespace
+    cleaned = text.gsub(/\s+/, ' ').strip
+    
+    # Remove trailing dots
+    cleaned = cleaned.sub(/\.+$/, '')
+    
+    cleaned
   end
 
   def run
@@ -1229,7 +1293,7 @@ class SessionBrowser
     content_text = message.text_content
     return 'Untitled' if content_text.empty?
     
-    content_text.length > 50 ? content_text[0...50] : content_text
+    clean_summary(content_text)
   end
 end
 
