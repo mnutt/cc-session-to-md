@@ -52,6 +52,13 @@ class SessionToMarkdown
 
   private
 
+  def strip_line_numbers(content)
+    # Remove line numbers in format "123→" from the beginning of each line
+    content.split("\n").map do |line|
+      line.sub(/^\s*\d+→/, '')
+    end.join("\n")
+  end
+
   def make_relative_path(path)
     return path unless @current_cwd && path
     
@@ -101,6 +108,26 @@ class SessionToMarkdown
       if text_contents.any? { |item| item['text']&.start_with?("Caveat:") }
         return
       end
+    end
+    
+    # Handle isMeta messages by putting them in collapsible details
+    if data['isMeta']
+      content_text = extract_text_content(message['content'])
+      unless content_text.empty?
+        # Use first line or first 50 characters as summary
+        summary_text = content_text.split("\n").first || content_text
+        summary_text = summary_text[0..50] + "..." if summary_text.length > 50
+        
+        @output << "<details><summary>#{summary_text}</summary>"
+        @output << ""
+        content_text.split("\n").each do |line|
+          @output << "> #{line}"
+        end
+        @output << ""
+        @output << "</details>"
+        @output << ""
+      end
+      return
     end
     
     # Capture toolUseResult data if present
@@ -171,9 +198,29 @@ class SessionToMarkdown
       # Regular user message
       content = message['content']
       
-      # Handle special command formats
-      if content.match(/<command-name>\/clear<\/command-name>/)
-        @output << "**🧹 User cleared the session**"
+      # Handle command messages
+      command_name_match = content.match(/<command-name>([^<]+)<\/command-name>/)
+      command_args_match = content.match(/<command-args>([^<]*)<\/command-args>/)
+      
+      if command_name_match
+        command_name = command_name_match[1]
+        command_args = command_args_match ? command_args_match[1] : ""
+        
+        # Handle special command formats
+        if command_name == "/clear"
+          @output << "**🧹 User cleared the session**"
+          @output << ""
+          return
+        end
+        
+        # Display command with args in quotes
+        @output << "### User"
+        @output << ""
+        if command_args.empty?
+          @output << "> #{command_name}"
+        else
+          @output << "> #{command_name} \"#{command_args}\""
+        end
         @output << ""
         return
       elsif content.match(/<local-command-stdout><\/local-command-stdout>/)
@@ -302,11 +349,26 @@ class SessionToMarkdown
                 @output << ""
               end
             end
+          elsif tool_call && ((tool_call['name'] == 'Bash' && tool_call['input']['command']&.match(/^(ls|LS)(\s|$)/)) || tool_call['name'] == 'LS')
+            # Special handling for ls commands and LS tool - truncate if needed
+            @output << "```"
+            lines = content.split("\n")
+            if lines.length > 50
+              truncated_content = lines.first(50).join("\n")
+              truncated_content += "\n... (#{lines.length - 50} more lines)"
+              @output << truncated_content
+            else
+              @output << content
+            end
+            @output << "```"
           elsif content.match(/^\s*\d+→/)
             # File read result with line numbers
-            language = detect_language(content)
+            # Try to get language from file path if available
+            file_path = tool_call && tool_call['name'] == 'Read' ? tool_call['input']['file_path'] : nil
+            language = file_path ? detect_language_from_path(file_path) : detect_language(content)
+            stripped_content = strip_line_numbers(content)
             @output << "```#{language}"
-            @output << content
+            @output << stripped_content
             @output << "```"
           elsif content.match(/^(Found \d+ files|\/.*\..*$)/)
             # File search results
@@ -449,13 +511,19 @@ class SessionToMarkdown
         "<b>Edit:</b> <code>#{file_path}</code>"
       when 'Bash'
         command = tool_input['command']
-        "<b>Bash:</b> <code>#{command}</code>"
+        # Don't capitalize ls command
+        display_command = command.start_with?('LS ') ? command.sub(/^LS /, 'ls ') : command
+        display_command = display_command == 'LS' ? 'ls' : display_command
+        "<b>Bash:</b> <code>#{display_command}</code>"
       when 'Write'
         file_path = make_relative_path(tool_input['file_path']) || 'unknown file'
         "<b>Write:</b> <code>#{file_path}</code>"
       when 'Fetch'
         url = tool_input['url']
         "<b>Fetch:</b> <code>#{url}</code>"
+      when 'LS'
+        path = tool_input['path'] ? make_relative_path(tool_input['path']) : 'current directory'
+        "<b>ls:</b> <code>#{path}</code>"
       else
         "<b>#{tool_name}:</b> #{format_tool_input_html(tool_input)}"
       end
@@ -518,8 +586,9 @@ class SessionToMarkdown
       @output << ""
       # Detect language from context or use generic
       language = detect_language(content)
+      stripped_content = strip_line_numbers(content)
       @output << "```#{language}"
-      @output << content
+      @output << stripped_content
       @output << "```"
       @output << ""
     elsif content.match(/^(Found \d+ files|\/.*\..*$)/)
@@ -572,6 +641,62 @@ class SessionToMarkdown
     end
     
     output.join("\n")
+  end
+
+  def extract_text_content(content)
+    if content.is_a?(Array)
+      text_items = content.select { |item| item['type'] == 'text' }
+      text_items.map { |item| item['text'] }.join("\n")
+    else
+      content.to_s
+    end
+  end
+
+  def detect_language_from_path(path)
+    case path
+    when /\.(js|jsx)$/i
+      "javascript"
+    when /\.(ts|tsx)$/i
+      "typescript"
+    when /\.(rb|ruby)$/i
+      "ruby"
+    when /\.(py|python)$/i
+      "python"
+    when /\.(cpp|cc|cxx|c\+\+|hpp|h)$/i
+      "cpp"
+    when /\.c$/i
+      "c"
+    when /\.java$/i
+      "java"
+    when /\.go$/i
+      "go"
+    when /\.rs$/i
+      "rust"
+    when /\.php$/i
+      "php"
+    when /\.(sh|bash)$/i
+      "bash"
+    when /\.sql$/i
+      "sql"
+    when /\.json$/i
+      "json"
+    when /\.(yaml|yml)$/i
+      "yaml"
+    when /\.xml$/i
+      "xml"
+    when /\.html$/i
+      "html"
+    when /\.css$/i
+      "css"
+    when /CMakeLists\.txt$/i
+      "cmake"
+    when /Makefile$/i
+      "makefile"
+    when /\.md$/i
+      "markdown"
+    else
+      ""
+    end
   end
 
   def detect_language(content)
