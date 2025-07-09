@@ -142,7 +142,11 @@ class SessionToMarkdown
       if regular_content.any?
         # Check for special content types
         content_item = regular_content.first
-        content_text = content_item['content'] || content_item.to_s
+        if content_item.is_a?(Hash) && content_item['type'] == 'text'
+          content_text = content_item['text']
+        else
+          content_text = content_item['content'] || content_item.to_json
+        end
         
         if content_text == "[Request interrupted by user for tool use]"
           # Skip this message since we already showed the cancellation above
@@ -152,7 +156,11 @@ class SessionToMarkdown
         @output << "### User"
         @output << ""
         regular_content.each do |content_item|
-          content_text = content_item['content'] || content_item.to_s
+          if content_item.is_a?(Hash) && content_item['type'] == 'text'
+            content_text = content_item['text']
+          else
+            content_text = content_item['content'] || content_item.to_json
+          end
           content_text.split("\n").each do |line|
             @output << "> #{line}"
           end
@@ -269,46 +277,57 @@ class SessionToMarkdown
         @output << "```"
         @output << ""
       else
-        # Create a summary for the list item
-        tool_summary = create_tool_result_list_summary(content, tool_use_id)
+        # Get the original tool call info if available
+        tool_call = @tool_call_map[tool_use_id]
         
-        @output << "<details><summary>#{tool_summary}</summary>"
-        @output << ""
-        
-        # Format the content based on type
-        if content.is_a?(Array)
-          # Handle structured content (array of content items)
-          content.each do |content_item|
-            if content_item['type'] == 'text'
-              @output << content_item['text']
-              @output << ""
-            end
-          end
-        elsif content.match(/^\s*\d+→/)
-          # File read result with line numbers
-          language = detect_language(content)
-          @output << "```#{language}"
-          @output << content
-          @output << "```"
-        elsif content.match(/^(Found \d+ files|\/.*\..*$)/)
-          # File search results
-          @output << "```"
-          @output << content
-          @output << "```"
-        elsif content.match(/^\s*(import|export|function|const|let|var|class|interface|type)/)
-          # Code content
-          @output << "```typescript"
-          @output << content
-          @output << "```"
+        # Special handling for TodoWrite - format as markdown todo list (not collapsed)
+        if tool_call && tool_call['name'] == 'TodoWrite'
+          @output << "**Updated task list**"
+          @output << ""
+          @output << format_todo_list(tool_call['input'])
+          @output << ""
         else
-          # Plain text result
-          @output << "```"
-          @output << content
-          @output << "```"
+          # Create a summary for the list item
+          tool_summary = create_tool_result_list_summary(content, tool_use_id)
+          
+          @output << "<details><summary>#{tool_summary}</summary>"
+          @output << ""
+          
+          # Format the content based on type
+          if content.is_a?(Array)
+            # Handle structured content (array of content items)
+            content.each do |content_item|
+              if content_item['type'] == 'text'
+                @output << content_item['text']
+                @output << ""
+              end
+            end
+          elsif content.match(/^\s*\d+→/)
+            # File read result with line numbers
+            language = detect_language(content)
+            @output << "```#{language}"
+            @output << content
+            @output << "```"
+          elsif content.match(/^(Found \d+ files|\/.*\..*$)/)
+            # File search results
+            @output << "```"
+            @output << content
+            @output << "```"
+          elsif content.match(/^\s*(import|export|function|const|let|var|class|interface|type)/)
+            # Code content
+            @output << "```typescript"
+            @output << content
+            @output << "```"
+          else
+            # Plain text result
+            @output << "```"
+            @output << content
+            @output << "```"
+          end
+          
+          @output << "</details>"
+          @output << ""
         end
-        
-        @output << "</details>"
-        @output << ""
       end
     end
     
@@ -406,6 +425,8 @@ class SessionToMarkdown
       tool_input = tool_call['input']
       
       case tool_name
+      when 'TodoWrite'
+        "<b>TodoWrite:</b> Updated task list"
       when 'Read'
         file_path = make_relative_path(tool_input['file_path']) || 'unknown file'
         limit = tool_input['limit']
@@ -526,6 +547,31 @@ class SessionToMarkdown
       @output << "```"
       @output << ""
     end
+  end
+
+  def format_todo_list(input)
+    return "" unless input && input['todos']
+    
+    output = []
+    input['todos'].each do |todo|
+      checkbox = case todo['status']
+      when 'completed'
+        '[x]'
+      else # pending or in_progress
+        '[ ]'
+      end
+      
+      status_indicator = case todo['status']
+      when 'in_progress'
+        ' (in progress)'
+      else
+        ''
+      end
+      
+      output << "- #{checkbox} #{todo['content']}#{status_indicator}"
+    end
+    
+    output.join("\n")
   end
 
   def detect_language(content)
