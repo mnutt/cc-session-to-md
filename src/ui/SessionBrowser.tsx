@@ -394,7 +394,7 @@ const SessionList: React.FC<{
       <Box flexDirection="column">
         <Box>
           <Text color="gray" bold>
-            {"Modified".padEnd(modifiedWidth)} {"Created".padEnd(createdWidth)} {"Messages".padStart(messagesWidth)}  Summary
+            {" "} {"Modified".padEnd(modifiedWidth)} {"Created".padEnd(createdWidth)} {"Messages".padStart(messagesWidth)}  Summary
           </Text>
         </Box>
         {sessions.map((session, index) => (
