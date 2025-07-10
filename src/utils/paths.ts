@@ -52,6 +52,34 @@ export function normalizePath(filePath: string): string {
 }
 
 /**
+ * Make a path relative to HOME directory
+ */
+export function makeRelativeToHome(filePath: string): string {
+  if (!filePath) {
+    return filePath;
+  }
+
+  try {
+    const homeDir = os.homedir();
+    const normalizedPath = path.resolve(filePath);
+    const normalizedHome = path.resolve(homeDir);
+    
+    // Check if the path is under the home directory
+    if (normalizedPath.startsWith(normalizedHome)) {
+      const relativePath = path.relative(normalizedHome, normalizedPath);
+      // Return with ~ prefix
+      return relativePath ? `~/${relativePath.replace(/\\/g, '/')}` : '~';
+    }
+    
+    // If not under home directory, return the original path
+    return filePath;
+  } catch (error) {
+    // If there's any error, return the original path
+    return filePath;
+  }
+}
+
+/**
  * Get the directory name from a file path
  */
 export function getDirectoryName(filePath: string): string {

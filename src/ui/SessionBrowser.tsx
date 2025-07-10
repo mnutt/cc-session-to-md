@@ -4,7 +4,7 @@ import { SessionParser } from '../parsers/SessionParser.js';
 import { MarkdownFormatter } from '../formatters/MarkdownFormatter.js';
 import { SessionInfo, ProjectInfo } from '../types/index.js';
 import { formatRelativeTime } from '../utils/time.js';
-import { normalizePath } from '../utils/paths.js';
+import { normalizePath, makeRelativeToHome } from '../utils/paths.js';
 import { copyToClipboard } from '../utils/clipboard.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -85,19 +85,62 @@ const SessionBrowserApp: React.FC<{
         return;
       }
 
-      const projects: ProjectInfo[] = projectDirs.map(dir => {
+      const projects: ProjectInfo[] = [];
+
+      for (const dir of projectDirs) {
         const fullPath = path.join(projectsDir, dir);
         const stats = fs.statSync(fullPath);
         const jsonlFiles = fs.readdirSync(fullPath).filter(file => file.endsWith('.jsonl'));
         
-        return {
+        if (jsonlFiles.length === 0) continue;
+
+        // Get CWD from any file in the directory by peeking at the first line with CWD
+        let cwd: string | null = null;
+        
+        // Try each file until we find a CWD
+        for (const jsonlFile of jsonlFiles) {
+          const filePath = path.join(fullPath, jsonlFile);
+          
+          try {
+            const content = fs.readFileSync(filePath, 'utf8');
+            const lines = content.split('\n');
+            
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              
+              try {
+                const data = JSON.parse(line);
+                if (data.cwd) {
+                  cwd = data.cwd;
+                  break;
+                }
+              } catch (parseError) {
+                // Skip invalid JSON lines
+                continue;
+              }
+            }
+            
+            // If we found a CWD, stop looking
+            if (cwd) break;
+          } catch (fileError) {
+            console.error(`Error reading file ${filePath}:`, fileError);
+            continue;
+          }
+        }
+
+        // If no CWD found, fall back to the original directory name display logic
+        const displayName = cwd 
+          ? makeRelativeToHome(cwd)
+          : dir.replace(/-/g, '/').replace(/_/g, ' ');
+        
+        projects.push({
           name: dir,
           path: fullPath,
-          displayName: dir.replace(/-Users-mnutt-p-/, '').replace(/-/g, '/').replace(/_/g, ' '),
+          displayName,
           sessionCount: jsonlFiles.length,
           lastModified: stats.mtime
-        };
-      });
+        });
+      }
 
       projects.sort((a, b) => b.lastModified.getTime() - a.lastModified.getTime());
 
@@ -336,30 +379,41 @@ const SessionList: React.FC<{
   selectedIndex: number;
   filter: string;
   project: ProjectInfo;
-}> = ({ sessions, selectedIndex, filter, project }) => (
-  <Box flexDirection="column">
-    <TitleHeader />
-    <Box marginY={1}>
-      <Text color="cyan" bold>Sessions in {project.displayName}:</Text>
-    </Box>
+}> = ({ sessions, selectedIndex, filter, project }) => {
+  // Calculate maximum width for each column to ensure proper alignment
+  const modifiedWidth = Math.max(8, ...sessions.map(s => formatRelativeTime(s.modified).length));
+  const createdWidth = Math.max(7, ...sessions.map(s => formatRelativeTime(s.created).length));
+  const messagesWidth = Math.max(8, ...sessions.map(s => s.messageCount.toString().length));
+  
+  return (
     <Box flexDirection="column">
-      <Box>
-        <Text color="gray" bold>{"Modified".padEnd(13)} {"Created".padEnd(13)} {"Messages".padStart(8)}  Summary</Text>
+      <TitleHeader />
+      <Box marginY={1}>
+        <Text color="cyan" bold>Sessions in {project.displayName}:</Text>
       </Box>
-      {sessions.map((session, index) => (
-        <Box key={session.sessionId}>
-          <Text color={index === selectedIndex ? "black" : "white"} 
-                backgroundColor={index === selectedIndex ? "cyan" : undefined}
-                wrap="truncate">
-            {index === selectedIndex ? "❯ " : "  "}
-            {formatRelativeTime(session.modified).padEnd(13)} {formatRelativeTime(session.created).padEnd(13)} {session.messageCount.toString().padStart(8)}  {session.summary}
+      <Box flexDirection="column">
+        <Box>
+          <Text color="gray" bold>
+            {"Modified".padEnd(modifiedWidth)} {"Created".padEnd(createdWidth)} {"Messages".padStart(messagesWidth)}  Summary
           </Text>
         </Box>
-      ))}
+        {sessions.map((session, index) => (
+          <Box key={session.sessionId}>
+            <Text 
+              color={index === selectedIndex ? "black" : "white"} 
+              backgroundColor={index === selectedIndex ? "cyan" : undefined}
+              wrap="truncate"
+            >
+              {index === selectedIndex ? "❯ " : "  "}
+              {formatRelativeTime(session.modified).padEnd(modifiedWidth)} {formatRelativeTime(session.created).padEnd(createdWidth)} {session.messageCount.toString().padStart(messagesWidth)}  {session.summary}
+            </Text>
+          </Box>
+        ))}
+      </Box>
+      <FooterControls filter={filter} itemCount={sessions.length} showBackOption />
     </Box>
-    <FooterControls filter={filter} itemCount={sessions.length} showBackOption />
-  </Box>
-);
+  );
+};
 
 const TitleHeader: React.FC = () => (
   <Box flexDirection="column" marginBottom={1}>

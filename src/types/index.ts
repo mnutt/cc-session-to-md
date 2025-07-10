@@ -94,6 +94,7 @@ export interface Session {
   lastModified: Date;
   messageCount: number;
   files: string[];
+  cwd?: string;
 }
 
 export interface SessionInfo {
@@ -104,6 +105,7 @@ export interface SessionInfo {
   messageCount: number;
   modified: Date;
   created: Date;
+  cwd?: string;
 }
 
 export interface ToolCallMap {

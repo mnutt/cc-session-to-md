@@ -103,6 +103,7 @@ export class SessionParser {
       .sort((a, b) => b.modified.getTime() - a.modified.getTime());
   }
 
+
   /**
    * Get session data for a specific session ID from multiple files
    */
@@ -234,6 +235,14 @@ export class SessionParser {
       files: []
     };
     
+    // Extract CWD from messages (prefer the first non-empty CWD)
+    for (const message of messages) {
+      if (message.cwd && !session.cwd) {
+        session.cwd = message.cwd;
+        break;
+      }
+    }
+    
     // Process each message
     for (const message of messages) {
       this.processSessionMessage(message, session);
@@ -330,7 +339,8 @@ export class SessionParser {
       summary,
       messageCount: session.messageCount,
       modified: session.lastModified,
-      created: session.firstCreated
+      created: session.firstCreated,
+      cwd: session.cwd
     };
   }
 }
