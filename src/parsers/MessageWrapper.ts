@@ -151,7 +151,8 @@ export class MessageWrapper {
    * Check if this is an interruption message
    */
   public isInterruptionMessage(): boolean {
-    return this.content === '[Request interrupted by user for tool use]';
+    const textContent = this.getTextContent();
+    return textContent === '[Request interrupted by user for tool use]';
   }
 
   /**

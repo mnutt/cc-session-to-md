@@ -1,5 +1,8 @@
 import { MessageData, ContentItem, ProcessingContext, ToolCallMap } from '../types/index.js';
 import { MessageWrapper } from '../parsers/MessageWrapper.js';
+import Debug from 'debug';
+
+const debug = Debug('session-to-md:processor');
 
 export class MessageProcessor {
   private output: string[] = [];
@@ -162,6 +165,11 @@ export class MessageProcessor {
 
     // Add to pending results
     this.context.pendingToolResults.push(...toolResults);
+    
+    debug(`Added ${toolResults.length} tool results. Total pending: ${this.context.pendingToolResults.length}`);
+    toolResults.forEach(result => {
+      debug(`  Tool result for ID: ${result.tool_use_id}`);
+    });
 
     // Check if next message continues tool results
     const nextMessage = messages[index + 1];
@@ -169,10 +177,8 @@ export class MessageProcessor {
       nextMessage.type === 'user' && 
       new MessageWrapper(nextMessage).getToolResults().length > 0;
 
-    if (!isContinuing) {
-      return this.flushPendingToolResults();
-    }
-
+    // Don't flush here - let MarkdownFormatter handle it
+    // This allows the formatter to check for pending results after each message
     return [];
   }
 
@@ -257,6 +263,7 @@ export class MessageProcessor {
         this.context.pendingTools.push(toolUse);
         if (toolUse.id) {
           this.context.toolCallMap[toolUse.id] = toolUse;
+          debug(`Stored tool use: ${toolUse.name} with ID ${toolUse.id}`);
         }
       });
     } else if (textContent.length > 0) {

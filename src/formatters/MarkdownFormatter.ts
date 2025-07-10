@@ -3,16 +3,19 @@ import { DEFAULT_FORMATTING_OPTIONS } from '../types/constants.js';
 import { MessageProcessor } from '../processors/MessageProcessor.js';
 import { ToolResultProcessor } from '../processors/ToolResultProcessor.js';
 import { SessionParser } from '../parsers/SessionParser.js';
+import Debug from 'debug';
+
+const debug = Debug('session-to-md:formatter');
 
 export class MarkdownFormatter {
   private messageProcessor: MessageProcessor;
-  private toolResultProcessor: ToolResultProcessor;
+  private toolResultProcessor!: ToolResultProcessor;
   private options: FormattingOptions;
 
   constructor(options: FormattingOptions = DEFAULT_FORMATTING_OPTIONS) {
     this.options = { ...DEFAULT_FORMATTING_OPTIONS, ...options };
     this.messageProcessor = new MessageProcessor();
-    this.toolResultProcessor = new ToolResultProcessor(this.messageProcessor.getContext());
+    // Don't create ToolResultProcessor here - create it fresh for each session
   }
 
   /**
@@ -47,6 +50,9 @@ export class MarkdownFormatter {
     
     // Reset processor state for each session
     this.messageProcessor.resetContext();
+    
+    // Create fresh ToolResultProcessor with current context after reset
+    this.toolResultProcessor = new ToolResultProcessor(this.messageProcessor.getContext());
     
     const output: string[] = [];
     output.push(`# ${summary}`, '');
@@ -83,19 +89,36 @@ export class MarkdownFormatter {
     messages: MessageData[], 
     index: number
   ): string[] {
+    debug(`Processing message ${index}, type: ${message.type}`);
     const result = this.messageProcessor.processMessage(message, messages, index);
-    
-    // Check if we need to flush tool results
     const context = this.messageProcessor.getContext();
+    
+    debug(`After processing message ${index}: ${context.pendingToolResults.length} pending tool results, ${Object.keys(context.toolCallMap).length} tools in map`);
+    
+    // Check if we need to flush tool results after processing this message
     if (context.pendingToolResults.length > 0) {
-      const toolResults = this.toolResultProcessor.formatToolResults(context.pendingToolResults);
+      // Check if next message continues tool results
+      const nextMessage = messages[index + 1];
+      const hasNextToolResults = nextMessage && 
+        nextMessage.type === 'user' && 
+        (nextMessage.message?.content as any)?.some?.((item: any) => item.type === 'tool_result');
       
-      // Clear pending results
-      context.pendingToolResults = [];
-      context.pendingTools = [];
-      context.currentToolUseResult = undefined;
+      // Debug logging
+      debug(`Message ${index}: Has ${context.pendingToolResults.length} pending tool results`);
+      debug(`Next message has tool results: ${hasNextToolResults}`);
       
-      return [...result, ...toolResults];
+      if (!hasNextToolResults) {
+        // No more tool results coming, flush now
+        debug(`Flushing tool results for message ${index}`);
+        const toolResults = this.toolResultProcessor.formatToolResults(context.pendingToolResults);
+        
+        // Clear pending results but keep toolCallMap for future tool results
+        context.pendingToolResults = [];
+        context.pendingTools = [];
+        context.currentToolUseResult = undefined;
+        
+        return [...result, ...toolResults];
+      }
     }
     
     return result;

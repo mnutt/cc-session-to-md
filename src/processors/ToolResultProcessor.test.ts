@@ -240,7 +240,7 @@ describe('ToolResultProcessor', () => {
     });
 
     it('should use plain text for unknown extensions', () => {
-      context.toolCallMap['tool-1'].input.file_path = '/test/file.unknown';
+      context.toolCallMap['tool-1'].input!.file_path = '/test/file.unknown';
       const content = '     1→some content';
       const result = (processor as any).formatFileContent(content, context.toolCallMap['tool-1']);
 

@@ -2,6 +2,9 @@ import { ContentItem, ToolCallMap, ToolUseResult, ProcessingContext } from '../t
 import { MessageWrapper } from '../parsers/MessageWrapper.js';
 import { detectLanguageFromPath, detectCodeLanguage } from '../utils/language.js';
 import { makeRelativePath } from '../utils/paths.js';
+import Debug from 'debug';
+
+const debug = Debug('session-to-md:tool-processor');
 
 export class ToolResultProcessor {
   private context: ProcessingContext;
@@ -14,12 +17,15 @@ export class ToolResultProcessor {
    * Format tool results and return markdown output
    */
   public formatToolResults(toolResults: ContentItem[]): string[] {
+    debug(`Formatting ${toolResults.length} tool results`);
     const result: string[] = [];
     
     toolResults.forEach(toolResult => {
+      debug(`Processing tool result for ID: ${toolResult.tool_use_id}`);
       result.push(...this.formatToolResult(toolResult));
     });
 
+    debug(`Generated ${result.length} lines of formatted output`);
     return result;
   }
 
@@ -27,7 +33,17 @@ export class ToolResultProcessor {
    * Format a single tool result
    */
   private formatToolResult(toolResult: ContentItem): string[] {
-    const content = toolResult.content as string;
+    let content: string;
+    if (Array.isArray(toolResult.content)) {
+      // Extract text from array of content items
+      content = toolResult.content
+        .filter(item => item.type === 'text')
+        .map(item => item.text || '')
+        .join('\n');
+    } else {
+      content = toolResult.content as string || '';
+    }
+    
     const toolUseId = toolResult.tool_use_id;
     const toolCall = toolUseId ? this.context.toolCallMap[toolUseId] : undefined;
 
@@ -296,6 +312,10 @@ export class ToolResultProcessor {
    * Create content-based summary
    */
   private createContentBasedSummary(content: string): string {
+    // Ensure content is a string
+    if (typeof content !== 'string') {
+      return '<b>Tool result:</b> non-text content';
+    }
     if (this.hasLineNumbers(content)) {
       const lines = content.split('\n');
       return `<b>Read:</b> file content (${lines.length} lines)`;
