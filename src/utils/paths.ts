@@ -5,29 +5,33 @@ import * as os from 'os';
  * Make a path relative to the current working directory
  */
 export function makeRelativePath(filePath: string, currentCwd?: string): string {
-  if (!filePath) {
-    return filePath;
+  if (!filePath || filePath === null || filePath === undefined) {
+    return filePath || '';
   }
 
-  if (!currentCwd) {
-    return filePath;
-  }
+  // Convert to string if not already
+  const pathStr = String(filePath);
+
+  // Use current working directory if not provided
+  const cwd = currentCwd || process.cwd();
 
   try {
-    const normalizedPath = path.resolve(filePath);
-    const normalizedCwd = path.resolve(currentCwd);
+    const normalizedPath = path.resolve(pathStr);
+    const normalizedCwd = path.resolve(cwd);
     
     // Check if the file is under the current directory
     if (normalizedPath.startsWith(normalizedCwd)) {
       const relativePath = path.relative(normalizedCwd, normalizedPath);
-      return relativePath || '.';
+      // Normalize path separators to forward slashes
+      return (relativePath || '.').replace(/\\/g, '/');
     }
     
-    // If not under current directory, return the original path
-    return filePath;
+    // If not under current directory, calculate relative path anyway
+    const relativePath = path.relative(normalizedCwd, normalizedPath);
+    return relativePath.replace(/\\/g, '/');
   } catch (error) {
     // If there's any error, return the original path
-    return filePath;
+    return pathStr;
   }
 }
 

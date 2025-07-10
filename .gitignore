@@ -113,3 +113,8 @@ dist
 
 # Mac
 .DS_Store
+
+# Test fixtures (large JSONL files)
+src/test/fixtures/*.jsonl
+!src/test/fixtures/small-sample.jsonl
+!src/test/fixtures/real-session-sample.jsonl
