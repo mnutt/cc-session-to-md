@@ -11,7 +11,7 @@ import * as os from 'os';
 const program = new Command();
 
 program
-  .name('cc-session-to-md')
+  .name('cc2md')
   .description('Convert Claude Code session logs to readable Markdown documentation')
   .version('1.0.0');
 
@@ -132,12 +132,21 @@ program
 program
   .action(async () => {
     try {
-      const input = await readStdin();
-      
-      const formatter = new MarkdownFormatter(DEFAULT_FORMATTING_OPTIONS);
-      const markdown = formatter.convertInput(input);
-      
-      console.log(markdown);
+      // Check if stdin has data available (is being piped to)
+      if (process.stdin.isTTY) {
+        // No pipe detected, launch browse mode
+        const { SessionBrowser } = await import('./ui/SessionBrowser.js');
+        const browser = new SessionBrowser('~/.claude/projects');
+        await browser.run();
+      } else {
+        // Data is being piped, process it as before
+        const input = await readStdin();
+        
+        const formatter = new MarkdownFormatter(DEFAULT_FORMATTING_OPTIONS);
+        const markdown = formatter.convertInput(input);
+        
+        console.log(markdown);
+      }
     } catch (error) {
       console.error('Error:', error instanceof Error ? error.message : error);
       process.exit(1);
