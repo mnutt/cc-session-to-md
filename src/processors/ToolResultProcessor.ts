@@ -230,7 +230,7 @@ export class ToolResultProcessor {
   /**
    * Create tool result summary
    */
-  private createToolResultSummary(content: string, toolUseId?: string): string {
+  public createToolResultSummary(content: string, toolUseId?: string): string {
     const toolCall = toolUseId ? this.context.toolCallMap[toolUseId] : undefined;
     
     if (!toolCall) {

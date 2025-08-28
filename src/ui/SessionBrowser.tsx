@@ -22,6 +22,7 @@ interface SessionBrowserState {
   selectedIndex: number;
   filter: string;
   error?: string;
+  statusMessage?: string;
 }
 
 export class SessionBrowser {
@@ -210,9 +211,25 @@ const SessionBrowserApp: React.FC<{
       console.log(markdown);
       
       await copyToClipboard(markdown);
-      console.log('\n📋 Copied to clipboard');
       
-      exit();
+      // Count lines in the markdown
+      const lineCount = markdown.split('\n').length;
+      
+      // Show status message and return to sessions view
+      setState(prev => ({ 
+        ...prev, 
+        mode: 'sessions',
+        statusMessage: `📋 Copied ${lineCount} lines to clipboard`
+      }));
+      
+      // Hide status message after 3 seconds
+      setTimeout(() => {
+        setState(prev => ({ 
+          ...prev, 
+          statusMessage: undefined
+        }));
+      }, 3000);
+      
     } catch (error) {
       onError(error instanceof Error ? error : new Error(String(error)));
     }
@@ -277,7 +294,7 @@ const SessionBrowserApp: React.FC<{
       return;
     }
 
-    if (key.backspace) {
+    if (key.backspace || key.delete) {
       setState(prev => ({ 
         ...prev, 
         filter: prev.filter.slice(0, -1),
@@ -286,7 +303,7 @@ const SessionBrowserApp: React.FC<{
       return;
     }
 
-    if (input && input.length === 1 && /[a-zA-Z0-9\s]/.test(input)) {
+    if (input && input.length === 1 && input >= ' ' && input <= '~') {
       setState(prev => ({ 
         ...prev, 
         filter: prev.filter + input,
@@ -321,6 +338,7 @@ const SessionBrowserApp: React.FC<{
         selectedIndex={clampedIndex}
         filter={state.filter}
         project={state.selectedProject!}
+        statusMessage={state.statusMessage}
       />
     );
   }
@@ -379,7 +397,8 @@ const SessionList: React.FC<{
   selectedIndex: number;
   filter: string;
   project: ProjectInfo;
-}> = ({ sessions, selectedIndex, filter, project }) => {
+  statusMessage?: string;
+}> = ({ sessions, selectedIndex, filter, project, statusMessage }) => {
   // Calculate maximum width for each column to ensure proper alignment
   const modifiedWidth = Math.max(8, ...sessions.map(s => formatRelativeTime(s.modified).length));
   const createdWidth = Math.max(7, ...sessions.map(s => formatRelativeTime(s.created).length));
@@ -410,7 +429,13 @@ const SessionList: React.FC<{
           </Box>
         ))}
       </Box>
-      <FooterControls filter={filter} itemCount={sessions.length} showBackOption />
+      {statusMessage ? (
+        <Box justifyContent="center" marginTop={1}>
+          <Text color="green" bold>{statusMessage}</Text>
+        </Box>
+      ) : (
+        <FooterControls filter={filter} itemCount={sessions.length} showBackOption />
+      )}
     </Box>
   );
 };

@@ -1,5 +1,6 @@
 import { MessageData, ContentItem, ProcessingContext, ToolCallMap } from '../types/index.js';
 import { MessageWrapper } from '../parsers/MessageWrapper.js';
+import { ToolResultProcessor } from './ToolResultProcessor.js';
 import Debug from 'debug';
 
 const debug = Debug('session-to-md:processor');
@@ -160,6 +161,52 @@ export class MessageProcessor {
     const errorResults = toolResults.filter(result => result.is_error);
     
     if (errorResults.length > 0) {
+      // For cancelled tools, show what was attempted instead of the error message
+      const cancelledResults = errorResults.map(result => {
+        const toolUseId = result.tool_use_id;
+        const toolCall = toolUseId ? this.context.toolCallMap[toolUseId] : undefined;
+        
+        // For Edit tools, set up structured patch like successful edits
+        if (toolCall?.name === 'Edit') {
+          const input = toolCall.input;
+          const filePath = input?.file_path;
+          const oldString = input?.old_string;
+          const newString = input?.new_string;
+          
+          if (filePath && oldString && newString) {
+            const oldLines = oldString.split('\n');
+            const newLines = newString.split('\n');
+            
+            const diffLines = [
+              ...oldLines.map((line: string) => `-${line}`),
+              ...newLines.map((line: string) => `+${line}`)
+            ];
+            
+            // Set up structured patch in context
+            this.context.currentToolUseResult = {
+              filePath,
+              structuredPatch: [{
+                oldStart: 1,
+                oldLines: oldLines.length,
+                newStart: 1,
+                newLines: newLines.length,
+                lines: diffLines
+              }]
+            };
+          }
+        }
+        
+        // For other tools, just remove the error flag
+        return {
+          ...result,
+          is_error: false
+        };
+      });
+      
+      // Add to pending results and let normal flow handle them
+      this.context.pendingToolResults.push(...cancelledResults);
+      
+      // Return the cancellation message to appear after the tool details
       return ['**❌ User cancelled tool execution**', ''];
     }
 
@@ -336,4 +383,5 @@ export class MessageProcessor {
   public setCurrentCwd(cwd: string): void {
     this.context.currentCwd = cwd;
   }
+
 }
