@@ -25,6 +25,9 @@ npm run build
 ### Command Line Interface
 
 ```bash
+# Interactive session browser -- this is probably all you need
+npm run dev -- browse
+
 # Convert JSONL from stdin to markdown
 cat session.jsonl | npm run dev
 
@@ -33,9 +36,6 @@ cat session.jsonl | npm run dev -- convert
 
 # Convert with options
 npm run dev -- convert -i session.jsonl -o output.md --no-syntax-highlighting
-
-# Interactive session browser
-npm run dev -- browse
 
 # Validate JSONL input
 cat session.jsonl | npm run dev -- validate
